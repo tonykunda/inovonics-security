@@ -1,2 +1,3 @@
 database_creds.py
-
+sftp-config.json
+email_creds.py

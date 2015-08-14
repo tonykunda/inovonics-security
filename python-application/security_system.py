@@ -1,25 +1,31 @@
 import ino_com
+import alert_interfaces
 import logging
 import database
+import threading
+import time
+import email_creds
 
 log = logging
 logFormat = '%(asctime)-15s %(levelname)s %(threadName)s %(message)s'
 log.basicConfig(format=logFormat, level="DEBUG")
-
 
 class SecuritySystem(object):
 	def __init__(self, serial):
 		self.db = database.DatabaseCommunication()
 		self.ino_serial = serial
 		self.inovonics = ino_com.InovonicsCommunication(self.ino_serial, log)
+		self.email = alert_interfaces.Email('smtp.gmail.com', 587, email_creds.email_user, email_creds.email_pass)
 		self.devices = self.db.single_column("SELECT serial FROM alarm_device")
+		self.alert_devices = self.db.all("SELECT id, address FROM alert_device")
 		self.device_list = {}
 		for device in self.devices:
 			self.device_list[device] = {"alarm1":False, "alarm2":False, "alarm3":False, "alarm4":False, "tamper":False, "low_battery":False}
 
 	def start_system(self):
 		self.inovonics.start_processing()
-		self.event_processing()
+		self.event_processing = threading.Thread(target=self.event_processing, name="Event Processing").start()
+		self.alert_queuing = threading.Thread(target=self.alert_queuing, name="Alert System").start()
 
 	def alarm_needed(self, uid):
 		armed, system_alarm = self.db.single_row("SELECT zone.armed, endpoint.system_alarm FROM endpoint LEFT JOIN zone ON endpoint.zone_id = zone.id WHERE endpoint.serial_id = '%s'" % (uid))
@@ -28,9 +34,19 @@ class SecuritySystem(object):
 
 	def create_alarm (self, uid):
 		zone, endpoint = self.db.single_row("SELECT zone.description, endpoint.description FROM endpoint LEFT JOIN zone ON endpoint.zone_id = zone.id WHERE endpoint.serial_id = '%s'" % (uid))
-		self.db.write("INSERT INTO alarm (start_time, next_alert, alarm_text) VALUES (NOW(), NOW(), 'ALARM! in %s zone on %s')" % (zone, endpoint))
+		self.db.write("INSERT INTO alarm (start_time, next_alert, alarm_text) VALUES (NOW(), NOW(), '%s zone on %s')" % (zone, endpoint))
 		self.db.write("UPDATE endpoint SET system_alarm = 1 WHERE serial_id = '%s'" % (uid))
 
+	def alert_queuing (self):
+		while True:
+			alarms = self.db.all("SELECT id, alarm_text from alarm WHERE next_alert < NOW() AND alarm_cleared = 0")
+			for alarm in alarms:
+				alarm_id, alarm_text = alarm
+				for alert_device in self.alert_devices:
+					self.email.sendEmail(alert_device[1], 'ALARM!', alarm_text)
+					print alert_device
+				self.db.write("UPDATE alarm SET next_alert = DATE_ADD(NOW(), INTERVAL 1 MINUTE) WHERE id = %s" % (alarm_id))
+			time.sleep(2)
 
 	def event_processing(self):
 		while True:
